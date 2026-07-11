@@ -39,6 +39,8 @@ Route::get('/login', function () {
     return redirect()->route('admin.login');
 })->name('login');
 
+Route::post('/midtrans/callback', [\App\Http\Controllers\MidtransWebhookController::class, 'handle']);
+
 
 Route::prefix('admin')->name('admin.')->group(function () {
 
