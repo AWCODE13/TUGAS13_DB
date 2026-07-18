@@ -102,31 +102,45 @@ public function success($order_id)
     // Mengambil daftar kategori untuk keperluan menu footer
     $categories = \App\Models\Category::all();
 
-    $transaction = Transaction::where('order_id', $order_id)
-        ->firstOrFail();
+    $transaction = Transaction::with('event')->where('order_id', $order_id)->firstOrFail();
 
-    // Validasi status pembayaran asli dari Midtrans
+    // Konfigurasi Midtrans untuk mengecek status transaksi langsung ke API
     \Midtrans\Config::$serverKey = env('MIDTRANS_SERVER_KEY');
     \Midtrans\Config::$isProduction = false;
+    \Midtrans\Config::$isSanitized = true;
+    \Midtrans\Config::$is3ds = true;
 
     try {
+        // Mengecek status pesanan secara mandiri (Bypass)
+        $status = \Midtrans\Transaction::status($order_id);
 
-        $midtransStatus = \Midtrans\Transaction::status($order_id);
+        if ($status) {
+            // Mengambil nilai status transaksi
+            $trx_status = is_array($status) ? ($status['transaction_status'] ?? '') : ($status->transaction_status ?? '');
 
-        // Jika pembayaran sukses
-        if (in_array($midtransStatus->transaction_status, ['capture', 'settlement'])) {
+            // Jika API Midtrans mengonfirmasi bahwa transaksi telah berhasil (settlement / capture)
+            if (in_array($trx_status, ['settlement', 'capture'])) {
+                // Hanya lakukan update jika status di database lokal masih 'pending' (indikasi Webhook tidak masuk)
+                if (strtolower($transaction->status) === 'pending') {
+                    $transaction->update(['status' => 'success']);
 
-            $transaction->update([
-                'status' => 'Success'
-            ]);
+                    if ($transaction->event && $transaction->event->stock > 0) {
+                        $transaction->event->stock = $transaction->event->stock - 1;
+                        $transaction->event->save();
+                    }
 
+                    try {
+                        \Illuminate\Support\Facades\Mail::to($transaction->customer_email)
+                            ->send(new \App\Mail\EventTicketMail($transaction));
+                    } catch (\Exception $e) {
+                        \Log::error('Gagal mengirim email E-Ticket secara manual (Bypass): ' . $e->getMessage());
+                    }
+                }
+            }
         }
-
     } catch (\Exception $e) {
-
-        return redirect()->route('home')
-            ->with('error', 'Transaksi tidak ditemukan atau gagal diproses oleh sistem pembayaran.');
-
+        // Jika terjadi error dari API Midtrans (transaksi tidak valid), kembalikan ke beranda
+        return redirect()->route('home')->with('error', 'Transaksi tidak ditemukan atau gagal diproses oleh sistem pembayaran.');
     }
 
     return view('checkout.success', compact('transaction', 'categories'));
